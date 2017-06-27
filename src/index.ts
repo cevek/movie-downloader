@@ -3,24 +3,12 @@ import { ITorrent } from "node-transmission-typescript/dist/models";
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
 var mkdirp = require('mkdirp');
-var x = new Transmission({
-
-});
 
 
-var dir = '/Users/cevek/Download/torrent-movies/';
-var torrent = 'magnet:?xt=urn:btih:71715CEF2F54D8CA277B892B3870605DF3E2748E&tr=http%3A%2F%2Fbt2.t-ru.org%2Fann%3Fmagnet&dn=%D0%9F%D0%BE%D1%81%D0%BB%D0%B5%D0%B4%D0%BD%D0%B8%D0%B9%20%D1%81%D0%B0%D0%BC%D1%83%D1%80%D0%B0%D0%B9%20%2F%20The%20Last%20Samurai%20(%D0%AD%D0%B4%D0%B2%D0%B0%D1%80%D0%B4%20%D0%A6%D0%B2%D0%B8%D0%BA%20%2F%20Edward%20Zwick)%20%5B2003%2C%20%D0%B1%D0%BE%D0%B5%D0%B2%D0%B8%D0%BA%2C%20%D0%B4%D1%80%D0%B0%D0%BC%D0%B0%2C%20%D0%BF%D1%80%D0%B8%D0%BA%D0%BB%D1%8E%D1%87%D0%B5%D0%BD%D0%B8%D1%8F%2C%20%D0%B2%D0%BE%D0%B5%D0%BD%D0%BD%D1%8B%D0%B9%2C%20%D0%B8%D1%81%D1%82%D0%BE%D1%80%D0%B8%D1%8F%2C%20BDRip-AVC%5D%20Dub%20%2B%20Original%20eng%20%2B';
+var downloadsDir = '/Users/cevek/Download/torrent-movies/';
+// var torrent = 'magnet:?xt=urn:btih:71715CEF2F54D8CA277B892B3870605DF3E2748E&tr=http%3A%2F%2Fbt2.t-ru.org%2Fann%3Fmagnet&dn=%D0%9F%D0%BE%D1%81%D0%BB%D0%B5%D0%B4%D0%BD%D0%B8%D0%B9%20%D1%81%D0%B0%D0%BC%D1%83%D1%80%D0%B0%D0%B9%20%2F%20The%20Last%20Samurai%20(%D0%AD%D0%B4%D0%B2%D0%B0%D1%80%D0%B4%20%D0%A6%D0%B2%D0%B8%D0%BA%20%2F%20Edward%20Zwick)%20%5B2003%2C%20%D0%B1%D0%BE%D0%B5%D0%B2%D0%B8%D0%BA%2C%20%D0%B4%D1%80%D0%B0%D0%BC%D0%B0%2C%20%D0%BF%D1%80%D0%B8%D0%BA%D0%BB%D1%8E%D1%87%D0%B5%D0%BD%D0%B8%D1%8F%2C%20%D0%B2%D0%BE%D0%B5%D0%BD%D0%BD%D1%8B%D0%B9%2C%20%D0%B8%D1%81%D1%82%D0%BE%D1%80%D0%B8%D1%8F%2C%20BDRip-AVC%5D%20Dub%20%2B%20Original%20eng%20%2B';
 
 var createdFilesPrefix = '__';
-
-async function main() {
-    await x.start([1]);
-    // await x.remove([1], true);
-    // var t = await x.addUrl(torrent, {'download-dir': dir} as any);
-    // console.log(t);
-    var torrents = await x.get();
-    console.log(torrents);
-}
 
 type Maybe<T> = T | undefined;
 
@@ -79,25 +67,29 @@ interface Stream {
     duration?: string;
 
     tags?: {
+        LANGUAGE?: string;
         language?: string;
         title?: string;
         filename?: string;
         mimetype?: string;
+        MIMETYPE?: string;
     }
 }
 
 class MediaFile {
     gdriveId = '';
-    get localFileName() {
-        return dir + this.fileName;
-    }
-    fileName = '';
+    skipToUpload = false;
     mediaInfo: MediaInfo;
+    constructor(public fileName: string) {
+
+    }
 }
 
 interface MovieData {
     id: number;
-    torrent: ITorrent;
+    dir: string;
+    magnetUrl: string;
+    torrent: Maybe<ITorrent>;
     videoEn: Maybe<MediaFile>;
     audioRuConverted: Maybe<MediaFile>;
     audioEnConverted: Maybe<MediaFile>;
@@ -117,12 +109,93 @@ async function exec(command: string, options?: childProcess.ExecOptions) {
     });
 }
 
+class TorrentWorker {
+    transmission = new Transmission({});
+    // queue: ITorrent[] = [];
+
+    constructor(public options: { torrentDownloadLimit: number }) {
+        this.runner();
+    }
+    async addOrFindMagnetUrl(magnetUrl: string, dir: string) {
+        var allTorrents = await this.transmission.get();
+        var existTorrent = allTorrents.find(t => t.magnetLink === magnetUrl);
+        if (existTorrent) {
+            return existTorrent;
+        }
+        var { id } = await this.transmission.addUrl(magnetUrl, { 'download-dir': dir } as any);
+
+        return (await this.transmission.get([id])).pop()!;
+    }
+
+    async waitForDone(torrent: ITorrent) {
+        return new Promise((resolve, reject) => {
+            var timeout;
+            wait();
+            function wait() {
+                if (torrent.percentDone === 1) {
+                    resolve();
+                }
+                else {
+                    timeout = setTimeout(wait, 1000);
+                }
+            }
+        });
+    }
+
+
+    async getAllTorrents() {
+        return await this.transmission.get();
+    }
+
+    async download(torrent: ITorrent) {
+        return await this.waitForDone(torrent);
+    }
+
+    private async runner() {
+        var allTorrents = await this.getAllTorrents();
+        var activeTorrentsCount = allTorrents.filter(t => t.status > 0).length;
+        var nonActiveTorrents = allTorrents.filter(t => t.status === 0);
+        if (activeTorrentsCount >= this.options.torrentDownloadLimit) {
+            return;
+        }
+        var torrent = nonActiveTorrents.shift();
+        if (torrent) {
+            await this.start(torrent);
+            this.waitForDone(torrent).then(() => this.runner())
+            await this.runner();
+        }
+    }
+
+    async start(torrent: ITorrent) {
+        return this.transmission.start([torrent.id]);
+    }
+
+    async remove(torrent: ITorrent) {
+        return this.transmission.remove([torrent.id], true);
+    }
+
+    async stop(torrent: ITorrent) {
+        return this.transmission.stop([torrent.id]);
+    }
+
+    async freeSpace(folder: string) {
+        return this.transmission.freeSpace(folder);
+    }
+
+}
+
+
 class Worker {
     movieData: MovieData;
-    constructor(id: number, torrent: ITorrent) {
+    torrentWorker: TorrentWorker;
+
+    constructor(id: number, magnetUrl: string, torrentWorker: TorrentWorker) {
+        this.torrentWorker = torrentWorker;
         this.movieData = {
             id,
-            torrent,
+            magnetUrl,
+            dir: downloadsDir + id + '/',
+            torrent: void 0,
             videoEn: void 0,
             audioRuConverted: void 0,
             audioEnConverted: void 0,
@@ -139,13 +212,15 @@ class Worker {
         }
         this.log('exec', command);
         var { stdout, stderr } = await exec(command, options);
-        this.movieData.logs.push(stderr + stderr);
+        if (stderr) {
+            this.log(stderr);
+        }
         return { stdout, stderr };
     }
 
     async doWork() {
         try {
-            mkdirp.sync(dir);
+            mkdirp.sync(this.movieData.dir);
             await this.downloadTorrent();
             await this.readFolderFiles();
             await this.extractInfoInAllFiles();
@@ -156,7 +231,7 @@ class Worker {
             await this.uploadAllToGDrive();
             await this.removeAllFiles();
         } catch (err) {
-            this.movieData.logs.push(err instanceof Error ? err.message : err);
+            this.log(err instanceof Error ? err.message : err);
             console.log(JSON.stringify(this.movieData, null, 2));
             throw err;
         }
@@ -164,16 +239,16 @@ class Worker {
 
     async readFolderFiles() {
         this.log('readFolderFiles');
-        var files = fs.readdirSync(dir).filter(file => file !== '.' && file !== '..' && file !== '.DS_Store' && file.substr(0, createdFilesPrefix.length) !== createdFilesPrefix);
-        this.movieData.allFiles = files.map(fileName => {
-            var file = new MediaFile();
-            file.fileName = fileName;
-            return file;
-        });
+        var files = fs.readdirSync(this.movieData.dir).filter(file => file !== '.' && file !== '..' && file !== '.DS_Store' && file.substr(0, createdFilesPrefix.length) !== createdFilesPrefix);
+        this.movieData.allFiles = files.map(fileName => new MediaFile(fileName));
     }
 
     async downloadTorrent() {
         this.log('downloadTorrent');
+        var { movieData } = this;
+        var torrent = await this.torrentWorker.addOrFindMagnetUrl(this.movieData.magnetUrl, this.movieData.dir);
+        this.movieData.torrent = torrent;
+        await this.torrentWorker.download(torrent);
     }
 
     async extractMediaInfo(fileName: string) {
@@ -189,32 +264,36 @@ class Worker {
 
     async extractInfoInAllFiles() {
         this.log('extractInfoInAllFiles');
-        var { allFiles } = this.movieData;
+        var { allFiles, dir } = this.movieData;
         for (var i = 0; i < allFiles.length; i++) {
             var file = allFiles[i];
             if (file.mediaInfo === void 0) {
-                file.mediaInfo = await this.extractMediaInfo(file.localFileName);
+                file.mediaInfo = await this.extractMediaInfo(dir + file.fileName);
             }
         }
     }
 
     async extractVideoStreams() {
         this.log('extractVideoStreams');
-        var { allFiles, logs } = this.movieData;
+        var { allFiles, dir } = this.movieData;
         var video = allFiles.find(file => this.isStreamCodecType(file, 'video'));
         if (video) {
-            video.mediaInfo = await this.extractMediaInfo(video.localFileName);
+            video.mediaInfo = await this.extractMediaInfo(dir + video.fileName);
             var parts = [];
             var subMediaFiles: MediaFile[] = [];
             for (var i = 0; i < video.mediaInfo.streams.length; i++) {
                 var stream = video.mediaInfo.streams[i];
-                var ext = stream.codec_type === 'subtitle' ? 'srt' : 'mkv';
-                var file = new MediaFile();
-                file.fileName = createdFilesPrefix + stream.index + '.' + ext;
+                // var ext = stream.codec_type === 'subtitle' ? 'srt' : (stream.codec_name === 'mjpeg' ? 'jpg' : 'mkv');
+                var file = new MediaFile(createdFilesPrefix + stream.index + '.mkv');
                 subMediaFiles.push(file);
-                parts.push(`-map 0:${stream.index} ${ext === 'srt' ? '' : '-c copy'} "${file.localFileName}"`);
+                //${ext === 'srt' ? '' : '-c copy'} 
+                parts.push(`-map 0:${stream.index} -c copy "${dir + file.fileName}"`);
             }
-            await this.exec(`ffmpeg -loglevel error -y -i "${video.localFileName}" ${parts.join(' ')}`);
+            if (parts.length === 0) {
+                this.log('Empty streams');
+            } else {
+                await this.exec(`ffmpeg -loglevel error -y -i "${dir + video.fileName}" ${parts.join(' ')}`);
+            }
             allFiles.push(...subMediaFiles);
             await this.extractInfoInAllFiles();
         }
@@ -222,71 +301,115 @@ class Worker {
 
     async findSubs() {
         this.log('findSubs');
-        var { movieData, movieData: { allFiles } } = this;
-        movieData.subRu = allFiles.find(file => this.isStreamCodecType(file, 'subtitle') && this.isRussianMediaFile(file));
-        movieData.subEn = allFiles.find(file => this.isStreamCodecType(file, 'subtitle') && this.isRussianMediaFile(file) === false);
+        var { movieData, movieData: { allFiles, dir } } = this;
+        var subEnMkv = allFiles.find(file => this.isStreamCodecType(file, 'subtitle') && this.isMediaFileWithLang(file, Worker.isDefinetlyEnglish));
+        var subRuMkv = allFiles.find(file => this.isStreamCodecType(file, 'subtitle') && this.isMediaFileWithLang(file, Worker.isDefinetlyRussian));
+        if (!subEnMkv) {
+            subEnMkv = allFiles.find(file => this.isStreamCodecType(file, 'subtitle') && this.isMediaFileWithLang(file, Worker.isDefinetlyRussian) === false);
+        }
+        if (subEnMkv) {
+            const subEn = new MediaFile('__en.srt');
+            await exec(`ffmpeg -loglevel error -y -i "${dir + subEnMkv.fileName}" "${dir + subEn.fileName}"`)
+            this.movieData.allFiles.push(subEn);
+            movieData.subEn = subEn;
+        } else {
+            this.log('subEn not found');
+        }
+        if (subRuMkv) {
+            const subRu = new MediaFile('__ru.srt');
+            await exec(`ffmpeg -loglevel error -y -i "${dir + subRuMkv.fileName}" "${dir + subRu.fileName}"`)
+            this.movieData.allFiles.push(subRu);
+            movieData.subRu = subRu;
+        } else {
+            this.log('subRu not found');
+        }
     }
 
     isStreamCodecType(file: MediaFile, type: 'video' | 'audio' | 'subtitle') {
         return file.mediaInfo.streams.length > 0 && file.mediaInfo.streams[0].codec_type === type;
     }
 
-    isRussianMediaFile(file: MediaFile) {
+    isMediaFileWithLang(file: MediaFile, langPredicate: (str: Maybe<string>) => boolean) {
         if (file.mediaInfo.streams.length > 0) {
             var stream = file.mediaInfo.streams[0];
-            if (stream.tags && (this.isRussianTitle(stream.tags.language) || this.isRussianTitle(stream.tags.title))) {
+            if (stream.tags && (langPredicate(stream.tags.language) || langPredicate(stream.tags.LANGUAGE) || langPredicate(stream.tags.title))) {
                 return true;
             }
         }
-        if (this.isRussianTitle(file.fileName)) {
+        if (langPredicate(file.fileName)) {
             return true;
         }
         return false;
     }
 
-    isRussianTitle(str: Maybe<string>) {
-        return str ? /(\brus?\b|\bдубляж\b|\bперевод\b)/i.test(str) : false;
+    static isDefinetlyRussian(str: Maybe<string>) {
+        return str ? /(\brus?\b|дубляж|перевод|русск)/i.test(str) : false;
     }
 
-
+    static isDefinetlyEnglish(str: Maybe<string>) {
+        return str ? /(\beng\b|англ)/i.test(str) : false;
+    }
     async convertEnRuAudio() {
         this.log('convertEnRuAudio');
         var { movieData, movieData: { allFiles } } = this;
-        var audioEn = allFiles.find(file => this.isStreamCodecType(file, 'audio') && this.isRussianMediaFile(file) === false);
-        var audioRu = allFiles.find(file => this.isStreamCodecType(file, 'audio') && this.isRussianMediaFile(file));
-        if (audioEn) {
-            movieData.audioEnConverted = await this.convertAudio(audioEn, createdFilesPrefix + 'en.m4a');
-            allFiles.push(movieData.audioEnConverted);
+        var audioEn = allFiles.find(file => this.isStreamCodecType(file, 'audio') && this.isMediaFileWithLang(file, Worker.isDefinetlyEnglish));
+        var audioRu = allFiles.find(file => this.isStreamCodecType(file, 'audio') && this.isMediaFileWithLang(file, Worker.isDefinetlyRussian));
+        if (!audioRu) {
+            this.log('audioRu not found');
         }
-        if (audioRu) {
-            movieData.audioRuConverted = await this.convertAudio(audioRu, createdFilesPrefix + 'ru.m4a');
-            allFiles.push(movieData.audioRuConverted);
+        if (!audioEn) {
+            this.log('audioEn not found');
+        }
+        var promises = [
+            audioEn ? this.convertAudio(audioEn, createdFilesPrefix + 'en.m4a') : Promise.resolve(void 0),
+            audioRu ? this.convertAudio(audioRu, createdFilesPrefix + 'ru.m4a') : Promise.resolve(void 0),
+        ];
+        var [enConverted, ruConverted] = await Promise.all(promises);
+        if (enConverted) {
+            movieData.audioEnConverted = enConverted;
+            allFiles.push(enConverted);
+        }
+        if (ruConverted) {
+            movieData.audioRuConverted = ruConverted;
+            allFiles.push(ruConverted);
         }
     }
 
     async convertAudio(audioFile: MediaFile, fileName: string) {
-        this.log('convertAudio');
-        var newAudioFile = new MediaFile();
-        newAudioFile.fileName = fileName;
-        await this.exec(`ffmpeg -y -loglevel error -i "${audioFile.localFileName}" -c:a libfdk_aac -profile:a aac_he_v2 -b:a 32k "${newAudioFile.localFileName}"`);
-        newAudioFile.mediaInfo = await this.extractMediaInfo(newAudioFile.localFileName);
+        var { dir } = this.movieData;
+        this.log('convertAudio', fileName);
+        var newAudioFile = new MediaFile(fileName);
+        // await this.exec(`ffmpeg -y -loglevel error -i "${dir + audioFile.fileName}" -map 0:0 -c:a libfdk_aac -profile:a aac_he -b:a 40k "${dir + newAudioFile.fileName}"`);
+        await this.exec(`ffmpeg -y -loglevel error -i "${dir + audioFile.fileName}" -vn -sn -map 0:0 -c copy "${dir + newAudioFile.fileName}"`);
+        newAudioFile.mediaInfo = await this.extractMediaInfo(dir + newAudioFile.fileName);
         return newAudioFile;
     }
 
 
     async rebuildVideo() {
         this.log('rebuildVideo');
-        var { movieData, movieData: { logs, allFiles, audioEnConverted } } = this;
-        var videoIdx = allFiles.findIndex(file => this.isStreamCodecType(file, 'video') && this.isRussianMediaFile(file) === false);
+        var { movieData, movieData: { allFiles, audioEnConverted, dir } } = this;
+        var videoIdx = allFiles.findIndex(file => this.isStreamCodecType(file, 'video'));
         var video = allFiles[videoIdx];
         if (video && audioEnConverted) {
-            var videoEn = new MediaFile();
-            videoEn.fileName = createdFilesPrefix + 'videoEn.mkv';
-            await this.exec(`ffmpeg -y -loglevel error -i "${video.localFileName}" -i ${audioEnConverted.localFileName} -c copy ${videoEn.fileName}`);
+            var videoEn = new MediaFile(createdFilesPrefix + 'videoEn.mkv');
+            await this.exec(`ffmpeg -y -loglevel error -i "${dir + video.fileName}" -i "${dir + audioEnConverted.fileName}" -map 0:0 -map 1:0 -c copy "${dir + videoEn.fileName}"`);
             movieData.videoEn = videoEn;
-            allFiles.splice(videoIdx, 1);
             allFiles.push(videoEn);
+            await this.extractInfoInAllFiles();
+            video.skipToUpload = true;
+        } else {
+            if (!video) {
+                this.log('video not found');
+            }
+            if (!audioEnConverted) {
+                this.log('audioEnConverted not found');
+            }
         }
+        var jsonFile = new MediaFile(createdFilesPrefix + 'data.json');
+        fs.writeFileSync(dir + jsonFile.fileName, JSON.stringify(this.movieData, null, 2));
+        allFiles.push(jsonFile);
+
     }
 
     async uploadAllToGDrive() {
@@ -295,7 +418,9 @@ class Worker {
         var promises = [];
         for (var i = 0; i < allFiles.length; i++) {
             var file = allFiles[i];
-            promises.push(this.uploadFileToGDrive(file));
+            if (file.skipToUpload === false) {
+                promises.push(this.uploadFileToGDrive(file));
+            }
         }
         await Promise.all(promises);
     }
@@ -312,14 +437,25 @@ class Worker {
             this.log('removeFile', file.fileName);
             // fs.unlinkSync(file.localFileName);
         }
+    }
 
+    async removeTorrent() {
+        this.log('removeTorrent');
+        // await this.torrentWorker.remove(this.movieData.torrent!);
     }
 
     log(type: string, fileName?: string) {
-        console.log(type + (fileName ? ': ' + fileName : ''));
+        var s = type + (fileName ? ': ' + fileName : '');
+        this.movieData.logs.push(s);
+        console.log(s);
     }
 }
 
-var worker = new Worker(1, {} as any);
+var torrentWorker = new TorrentWorker({ torrentDownloadLimit: 1 });
+
+var worker = new Worker(1, 'magnet:?xt=urn:btih:5EF07958AE01177F997E5772AE4B1FA243C1A987', torrentWorker);
+worker.doWork().catch(err => console.error(err));
+
+var worker = new Worker(222, 'magnet:?xt=urn:btih:71715CEF2F54D8CA277B892B3870605DF3E2748E&tr=http%3A%2F%2Fbt2.t-ru.org%2Fann%3Fmagnet&dn=%D0%9F%D0%BE%D1%81%D0%BB%D0%B5%D0%B4%D0%BD%D0%B8%D0%B9%20%D1%81%D0%B0%D0%BC%D1%83%D1%80%D0%B0%D0%B9%20%2F%20The%20Last%20Samurai%20(%D0%AD%D0%B4%D0%B2%D0%B0%D1%80%D0%B4%20%D0%A6%D0%B2%D0%B8%D0%BA%20%2F%20Edward%20Zwick)%20%5B2003%2C%20%D0%B1%D0%BE%D0%B5%D0%B2%D0%B8%D0%BA%2C%20%D0%B4%D1%80%D0%B0%D0%BC%D0%B0%2C%20%D0%BF%D1%80%D0%B8%D0%BA%D0%BB%D1%8E%D1%87%D0%B5%D0%BD%D0%B8%D1%8F%2C%20%D0%B2%D0%BE%D0%B5%D0%BD%D0%BD%D1%8B%D0%B9%2C%20%D0%B8%D1%81%D1%82%D0%BE%D1%80%D0%B8%D1%8F%2C%20BDRip-AVC%5D%20Dub%20%2B%20Original%20eng%20%2B', torrentWorker);
 worker.doWork().catch(err => console.error(err));
 
