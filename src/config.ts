@@ -9,8 +9,13 @@ try {
     console.error(e);
 }
 
-
 interface Config {
+    db: {
+        host: string;
+        user: string;
+        database: string;
+        password: string;
+    };
     mail: {
         from: string;
         admin: string;
