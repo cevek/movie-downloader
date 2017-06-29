@@ -4,9 +4,16 @@ import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import { query } from './db';
 var mkdirp = require('mkdirp');
+var shellEscape = require('shell-escape');
 
 
-var downloadsDir = '/Users/cevek/Download/torrent-movies/';
+function shellArgEscape(str: string): string {
+    return shellEscape([str]);
+}
+
+
+
+var downloadsDir = '/Users/cody/Download/torrent-movies/';
 // var torrent = 'magnet:?xt=urn:btih:71715CEF2F54D8CA277B892B3870605DF3E2748E&tr=http%3A%2F%2Fbt2.t-ru.org%2Fann%3Fmagnet&dn=%D0%9F%D0%BE%D1%81%D0%BB%D0%B5%D0%B4%D0%BD%D0%B8%D0%B9%20%D1%81%D0%B0%D0%BC%D1%83%D1%80%D0%B0%D0%B9%20%2F%20The%20Last%20Samurai%20(%D0%AD%D0%B4%D0%B2%D0%B0%D1%80%D0%B4%20%D0%A6%D0%B2%D0%B8%D0%BA%20%2F%20Edward%20Zwick)%20%5B2003%2C%20%D0%B1%D0%BE%D0%B5%D0%B2%D0%B8%D0%BA%2C%20%D0%B4%D1%80%D0%B0%D0%BC%D0%B0%2C%20%D0%BF%D1%80%D0%B8%D0%BA%D0%BB%D1%8E%D1%87%D0%B5%D0%BD%D0%B8%D1%8F%2C%20%D0%B2%D0%BE%D0%B5%D0%BD%D0%BD%D1%8B%D0%B9%2C%20%D0%B8%D1%81%D1%82%D0%BE%D1%80%D0%B8%D1%8F%2C%20BDRip-AVC%5D%20Dub%20%2B%20Original%20eng%20%2B';
 
 var createdFilesPrefix = '__';
@@ -35,14 +42,6 @@ function walkDir(dir: string) {
     return results;
 }
 
-enum MediaFileStatus {
-    EXTRACTING_INFO = 'EXTRACTING_INFO',
-    EXTRACTING_STREAMS = 'EXTRACTING_STREAMS',
-    CONVERTING_AUDIO = 'CONVERTING_AUDIO',
-    REBUILDING_VIDEO = 'REBUILDING_VIDEO',
-    UPLOADING_TO_GDRIVE = 'UPLOADING_TO_GDRIVE',
-    REMOVING = 'REMOVING_FILES',
-}
 
 function num(value: string): number {
     var val = +value;
@@ -57,6 +56,7 @@ interface MediaInfo {
     format: {
         duration: string;
         bit_rate: string;
+        format_name: string;
         tags: {
             title: string;
         }
@@ -100,6 +100,7 @@ class MediaFile {
     gdriveId = '';
     skipToUpload = false;
     mediaInfo: Maybe<MediaInfo>;
+    videoStreamIdx = -1;
     constructor(public fileName: string) {
 
     }
@@ -135,8 +136,22 @@ class TorrentWorker {
     // queue: ITorrent[] = [];
 
     constructor(public options: { torrentDownloadLimit: number }) {
-        this.runner();
+        this.updateAllTorrents();
     }
+
+    async updateAllTorrents() {
+        var update = () => {
+            this.getAllTorrents().then(allTorrents => {
+                this.allTorrents = allTorrents;
+                var activeTorrentsCount = allTorrents.filter(torrent => torrent.status > 0).length;
+                if (activeTorrentsCount > 0) {
+                    setTimeout(update, 1000);
+                }
+            })
+        }
+        update();
+    }
+
     async addOrFindMagnetUrl(magnetUrl: string, dir: string) {
         var allTorrents = await this.transmission.get();
         var existTorrent = allTorrents.find(t => t.magnetLink === magnetUrl);
@@ -174,10 +189,8 @@ class TorrentWorker {
     }
 
     private async runner() {
-        var allTorrents = await this.getAllTorrents();
-        this.allTorrents = allTorrents;
-        var activeTorrentsCount = allTorrents.filter(t => t.status > 0).length;
-        var nonActiveTorrents = allTorrents.filter(t => t.status === 0);
+        var activeTorrentsCount = this.allTorrents.filter(t => t.status > 0).length;
+        var nonActiveTorrents = this.allTorrents.filter(t => t.status === 0);
         if (activeTorrentsCount >= this.options.torrentDownloadLimit) {
             return;
         }
@@ -295,7 +308,7 @@ class Worker {
 
     async extractMediaInfo(fileName: string) {
         this.log('extractMediaInfo', fileName);
-        var { stdout, stderr } = await this.exec(`ffprobe -v quiet -print_format json -show_format -show_streams -show_chapters '${fileName}'`);
+        var { stdout, stderr } = await this.exec(`ffprobe -v quiet -print_format json -show_format -show_streams -show_chapters ${shellArgEscape(fileName)}`);
         if (stderr) throw new Error(stderr);
         try {
             return JSON.parse(stdout) as MediaInfo;
@@ -309,7 +322,7 @@ class Worker {
         var { allFiles, dir } = this.movieData;
         for (var i = 0; i < allFiles.length; i++) {
             var file = allFiles[i];
-            if (file.mediaInfo === void 0 && /(mp3|aac|ac3|dts|mkv|avi|flv|mpe?g|ogg|m4a|mp4|m4v|mov|qt|jpe?g|png|gif|flac)$/i.test(file.fileName)) {
+            if (file.mediaInfo === void 0 && /(mp3|aac|ac3|dts|mkv|avi|flv|mpe?g|ogg|m4a|mp4|m4v|mov|qt|jpe?g|png|gif|flac|srt|sub|ass|ssa)$/i.test(file.fileName)) {
                 file.mediaInfo = await this.extractMediaInfo(file.fileName);
             }
         }
@@ -321,20 +334,22 @@ class Worker {
         var video = allFiles.find(file => this.isStreamCodecType(file, 'video'));
         if (video) {
             video.mediaInfo = await this.extractMediaInfo(video.fileName);
+            var containerFormat = video.mediaInfo.format.format_name;
             var parts = [];
             var subMediaFiles: MediaFile[] = [];
             for (var i = 0; i < video.mediaInfo.streams.length; i++) {
                 var stream = video.mediaInfo.streams[i];
-                // var ext = stream.codec_type === 'subtitle' ? 'srt' : (stream.codec_name === 'mjpeg' ? 'jpg' : 'mkv');
-                var file = new MediaFile(dir + createdFilesPrefix + stream.index + '.mkv');
+                var ext = containerFormat === 'avi' ? 'avi' : 'mkv';
+                var file = new MediaFile(dir + createdFilesPrefix + stream.index + '.' + ext);
+                file.videoStreamIdx = stream.index;
                 subMediaFiles.push(file);
                 //${ext === 'srt' ? '' : '-c copy'} 
-                parts.push(`-map 0:${stream.index} -c copy '${file.fileName}'`);
+                parts.push(`-map 0:${stream.index} -c copy ${shellArgEscape(file.fileName)}`);
             }
             if (parts.length === 0) {
                 this.log('Empty streams');
             } else {
-                await this.exec(`ffmpeg -loglevel error -y -i '${video.fileName}' ${parts.join(' ')}`);
+                await this.exec(`ffmpeg -loglevel error -y -i ${shellArgEscape(video.fileName)} ${parts.join(' ')}`);
             }
             allFiles.push(...subMediaFiles);
             await this.extractInfoInAllFiles();
@@ -398,9 +413,11 @@ class Worker {
         var audioEn = audioFiles.find(file => this.isMediaFileWithLang(file, Worker.isDefinetlyEnglish));
         var audioRu = audioFiles.find(file => this.isMediaFileWithLang(file, Worker.isDefinetlyRussian));
         if (!audioEn) {
+            audioEn = audioFiles.find(file => file.videoStreamIdx !== 1 && this.isMediaFileWithLang(file, Worker.isDefinetlyRussian) === false);
             this.log('audioEn not found');
         }
         if (!audioRu) {
+            audioRu = audioFiles.find(file => file.videoStreamIdx === 1);
             this.log('audioRu not found');
         }
         var promises = [
@@ -423,7 +440,7 @@ class Worker {
         this.log('convertAudio', fileName);
         var newAudioFile = new MediaFile(dir + fileName);
         // await this.exec(`ffmpeg -y -loglevel error -i '${audioFile.fileName}' -map 0:0 -c:a libfdk_aac -profile:a aac_he -b:a 40k '${newAudioFile.fileName}'`);
-        await this.exec(`ffmpeg -y -loglevel error -i '${audioFile.fileName}' -vn -sn -map 0:0 -c copy '${newAudioFile.fileName}'`);
+        await this.exec(`ffmpeg -y -loglevel error -i ${shellArgEscape(audioFile.fileName)} -vn -sn -map 0:0 -c copy ${shellArgEscape(newAudioFile.fileName)}`);
         newAudioFile.mediaInfo = await this.extractMediaInfo(newAudioFile.fileName);
         return newAudioFile;
     }
@@ -435,8 +452,9 @@ class Worker {
         var videoIdx = allFiles.findIndex(file => this.isStreamCodecType(file, 'video'));
         var video = allFiles[videoIdx];
         if (video && audioEnConverted) {
-            var videoEn = new MediaFile(dir + createdFilesPrefix + 'videoEn.mkv');
-            await this.exec(`ffmpeg -y -loglevel error -i '${video.fileName}' -i '${audioEnConverted.fileName}' -map 0:0 -map 1:0 -c copy '${videoEn.fileName}'`);
+            var ext = video.mediaInfo!.format.format_name === 'avi' ? 'avi' : 'mkv';
+            var videoEn = new MediaFile(dir + createdFilesPrefix + 'videoEn.' + ext);
+            await this.exec(`ffmpeg -y -loglevel error -i ${shellArgEscape(video.fileName)} -i ${shellArgEscape(audioEnConverted.fileName)} -map 0:0 -map 1:0 -c copy ${shellArgEscape(videoEn.fileName)}`);
             movieData.videoEn = videoEn;
             allFiles.push(videoEn);
             await this.extractInfoInAllFiles();
@@ -504,7 +522,7 @@ interface MovieDownload {
     hash: string;
 }
 async function main() {
-    var list = await query<MovieDownload[]>('SELECT d.id, rt.title, rt.hash FROM downloads d LEFT JOIN rt ON rt.id = rtId WHERE gdId IS NULL LIMIT 10');
+    var list = await query<MovieDownload[]>('SELECT d.id, rt.title, rt.hash FROM downloads d LEFT JOIN rt ON rt.id = rtId WHERE gdId IS NULL LIMIT 10,10');
     var promises = [];
     for (var i = 0; i < list.length; i++) {
         var row = list[i];
