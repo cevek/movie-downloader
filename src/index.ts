@@ -2,7 +2,9 @@ import { Transmission, SettingsConfig } from 'node-transmission-typescript';
 import { ITorrent } from 'node-transmission-typescript/dist/models';
 import * as childProcess from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
 import { query } from './db';
+import { Drive } from "./drive";
 var mkdirp = require('mkdirp');
 var shellEscape = require('shell-escape');
 
@@ -49,6 +51,27 @@ function num(value: string): number {
         throw new Error(`${value} is not a number`);
     }
     return val;
+}
+
+
+enum DownloadStatus {
+    ERRORED = -1,
+    SKIP = 0,
+    NEED_TO_DOWNLOAD = 1,
+    DONE = 2,
+}
+
+interface Download {
+    id: number;
+    kpId: number;
+    rtId: number;
+    gdId: Maybe<string>;
+    startedAt: Maybe<Date>;
+    endedAt: Maybe<Date>;
+    logs: string;
+    status: DownloadStatus;
+    size: number;
+    hash: string;
 }
 
 interface MediaInfo {
@@ -224,9 +247,11 @@ class TorrentWorker {
 class Worker {
     movieData: MovieData;
     torrentWorker: TorrentWorker;
+    drive: Drive;
 
-    constructor(id: number, magnetUrl: string, torrentWorker: TorrentWorker) {
+    constructor(id: number, magnetUrl: string, torrentWorker: TorrentWorker, drive: Drive) {
         this.torrentWorker = torrentWorker;
+        this.drive = drive;
         this.movieData = {
             id,
             magnetUrl,
@@ -268,9 +293,11 @@ class Worker {
             await this.saveDataJSON();
             await this.uploadAllToGDrive();
             await this.removeAllFiles();
+            await this.save(DownloadStatus.DONE);
         } catch (err) {
             this.log(err instanceof Error ? err.stack : err);
             await this.saveDataJSON();
+            await this.save(DownloadStatus.ERRORED);
             // console.log(JSON.stringify(this.movieData, null, 2));
             throw err;
         }
@@ -471,19 +498,21 @@ class Worker {
 
     async uploadAllToGDrive() {
         this.log('uploadAllToGDrive');
+        var folder = await this.drive.createFolder(this.movieData.id + '');
         var { movieData: { allFiles } } = this;
         var promises = [];
         for (var i = 0; i < allFiles.length; i++) {
             var file = allFiles[i];
             if (file.skipToUpload === false) {
-                promises.push(this.uploadFileToGDrive(file));
+                promises.push(this.uploadFileToGDrive(folder.id, file));
             }
         }
         await Promise.all(promises);
     }
 
-    async uploadFileToGDrive(file: MediaFile) {
+    async uploadFileToGDrive(folderId: string, file: MediaFile) {
         this.log('uploadFileToGDrive', file.fileName);
+        await this.drive.uploadFile(folderId, path.basename(file.fileName), fs.createReadStream(file.fileName));
     }
 
     async removeAllFiles() {
@@ -501,6 +530,11 @@ class Worker {
         // await this.torrentWorker.remove(this.movieData.torrent!);
     }
 
+    async save(status: DownloadStatus) {
+        var info = JSON.stringify(this.movieData, null, 2);
+        await query('UPDATE downloads SET endedAt = NOW(), info = ? status = ? WHERE id = ?', [info, status, this.movieData.id]);
+    }
+
     log(type: string, fileName?: string) {
         var s = type + (fileName ? ': ' + fileName : '');
         this.movieData.logs.push(s);
@@ -508,7 +542,6 @@ class Worker {
     }
 }
 
-var torrentWorker = new TorrentWorker({ torrentDownloadLimit: 1 });
 
 // var worker = new Worker(111, 'magnet:?xt=urn:btih:5EF07958AE01177F997E5772AE4B1FA243C1A987', torrentWorker);
 // worker.doWork().catch(err => console.error(err));
@@ -522,14 +555,19 @@ interface MovieDownload {
     hash: string;
 }
 async function main() {
+    var drive = new Drive();
+    var torrentWorker = new TorrentWorker({ torrentDownloadLimit: 1 });
+    await drive.auth.authorize();
     var list = await query<MovieDownload[]>('SELECT d.id, rt.title, rt.hash FROM downloads d LEFT JOIN rt ON rt.id = rtId WHERE gdId IS NULL LIMIT 10,10');
     var promises = [];
     for (var i = 0; i < list.length; i++) {
         var row = list[i];
-        var worker = new Worker(row.id, 'magnet:?xt=urn:btih:' + row.hash, torrentWorker);
+        var worker = new Worker(row.id, 'magnet:?xt=urn:btih:' + row.hash, torrentWorker, drive);
         promises.push(worker.doWork());
     }
     await Promise.all(promises);
 }
+
+
 main().catch(err => err instanceof Error ? console.error('----------------------------------\n' + err.stack) : err);
 

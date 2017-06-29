@@ -75,7 +75,7 @@ export class Drive {
       'name': name,
       'mimeType': 'application/vnd.google-apps.folder'
     };
-    return this.action('files', 'create', {
+    return this.action<{id: string}>('files', 'create', {
       resource: fileMetadata,
       fields: 'id'
     });
