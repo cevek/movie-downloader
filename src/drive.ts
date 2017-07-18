@@ -147,15 +147,10 @@ export class Youtube {
     }
     upload(title: string, body: any) {
         var fileMetadata = {
-            'snippet.categoryId': '22',
-            'snippet.defaultLanguage': 'en',
-            'snippet.description': '',
-            'snippet.tags[]': '',
-            'snippet.title': title,
-            'status.embeddable': '',
-            'status.license': '',
-            'status.privacyStatus': 'private',
-            'status.publicStatsViewable': '',
+            snippet: {
+                title: title,
+                privacyStatus: 'private'
+            }
         };
         var media = {
             // mimeType: 'image/jpeg',

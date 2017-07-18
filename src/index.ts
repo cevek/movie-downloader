@@ -13,7 +13,7 @@ function shellArgEscape(str: string): string {
     return shellEscape([str]);
 }
 
-var downloadsDir = '/Users/cody/Download/torrent-movies/';
+var downloadsDir = process.env.HOME + '/Download/torrent-movies/';
 // var torrent = 'magnet:?xt=urn:btih:71715CEF2F54D8CA277B892B3870605DF3E2748E&tr=http%3A%2F%2Fbt2.t-ru.org%2Fann%3Fmagnet&dn=%D0%9F%D0%BE%D1%81%D0%BB%D0%B5%D0%B4%D0%BD%D0%B8%D0%B9%20%D1%81%D0%B0%D0%BC%D1%83%D1%80%D0%B0%D0%B9%20%2F%20The%20Last%20Samurai%20(%D0%AD%D0%B4%D0%B2%D0%B0%D1%80%D0%B4%20%D0%A6%D0%B2%D0%B8%D0%BA%20%2F%20Edward%20Zwick)%20%5B2003%2C%20%D0%B1%D0%BE%D0%B5%D0%B2%D0%B8%D0%BA%2C%20%D0%B4%D1%80%D0%B0%D0%BC%D0%B0%2C%20%D0%BF%D1%80%D0%B8%D0%BA%D0%BB%D1%8E%D1%87%D0%B5%D0%BD%D0%B8%D1%8F%2C%20%D0%B2%D0%BE%D0%B5%D0%BD%D0%BD%D1%8B%D0%B9%2C%20%D0%B8%D1%81%D1%82%D0%BE%D1%80%D0%B8%D1%8F%2C%20BDRip-AVC%5D%20Dub%20%2B%20Original%20eng%20%2B';
 
 var createdFilesPrefix = '__';
@@ -29,7 +29,7 @@ function walkDir(dir: string) {
     if (dir[dir.length - 1] === '/') {
         dir = dir.substr(0, dir.length - 1);
     }
-    list.forEach(function(file) {
+    list.forEach(function (file) {
         file = dir + '/' + file;
         var stat = fs.statSync(file);
         if (stat && stat.isDirectory()) {
@@ -47,6 +47,10 @@ function num(value: string): number {
         throw new Error(`${value} is not a number`);
     }
     return val;
+}
+
+async function sleep(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 enum DownloadStatus {
@@ -119,7 +123,7 @@ class MediaFile {
     skipToUpload = false;
     mediaInfo: Maybe<MediaInfo>;
     videoStream: Maybe<Stream>;
-    constructor(public fileName: string) {}
+    constructor(public fileName: string) { }
 }
 
 interface MovieData {
@@ -541,6 +545,7 @@ class Worker {
         var audioFiles = allFiles.filter(file => this.isStreamCodecType(file, 'audio'));
         var audioEn = audioFiles.find(file => this.isMediaFileWithLang(file, Worker.isDefinetlyEnglish));
         if (video && audioEn && video.mediaInfo && +video.mediaInfo.format.duration > 0) {
+            // var ext = video.mediaInfo.format.format_name === 'avi' ? 'avi' : 'mkv';
             var dur = +video.mediaInfo.format.duration;
             var partsCount = Math.ceil(dur / 600);
             var promises: Promise<{}>[] = [];
@@ -580,6 +585,9 @@ class Worker {
         this.log('uploadVideoPartToYoutube', part.fileName);
         try {
             var res = await this.youtube.upload('FooBar', fs.createReadStream(part.fileName));
+            this.log('Youtube: start processing');
+            await this.getYtProcessingStatus(res.id);
+            this.log('Youtube: processing');
             await query('INSERT INTO youtubeVideos (downloadId, ytId, part, createdAt) VALUES (?, ?, ?, NOW())', [
                 id,
                 res.id,
@@ -587,13 +595,30 @@ class Worker {
             ]);
         } catch (err) {
             if (attempt <= 3) {
-                this.log(`Upload error, try again: ${partIdx}\n` + err.stack);
+                this.log(`Upload error, try again: ${partIdx}\n` + err.message);
                 await this.uploadVideoPartToYoutube(partIdx, part, attempt + 1);
             } else {
-                this.log(`Upload error: ${partIdx}\n` + err.stack);
+                this.log(`Upload error: ${partIdx}\n` + err.message);
             }
         }
         this.log('uploadVideoPartToYoutube done', part.fileName);
+    }
+
+    async getYtProcessingStatus(ytId: string) {
+        console.log('getYtProcessingStatus', ytId);
+        var res = await this.youtube.videosList({ id: ytId, part: 'processingDetails' }) as { items: { processingDetails: { processingStatus: string, processingFailureReason: string } }[] };
+        var item = res.items[0];
+        var status = item.processingDetails.processingStatus;
+        if (status === 'failed' || status === 'terminated') {
+            throw new Error('youtube video converting failed: ' + item.processingDetails.processingFailureReason);
+        }
+        if (status === 'processing') {
+            await sleep(10000);
+            await this.getYtProcessingStatus(ytId);
+        }
+        if (status === 'succeeded') {
+
+        }
     }
 
     async uploadFileToGDrive(folderId: string, file: MediaFile) {
