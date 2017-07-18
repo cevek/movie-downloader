@@ -8,8 +8,8 @@ connection.connect();
 
 export function query<T>(sql: string, args?: (number | boolean | string | Date | null)[]) {
     return new Promise<T>((resolve, reject) => {
-        connection.query(sql, args, (error: any, results: T) => {
-            if (error) return reject(error);
+        var q:any = connection.query(sql, args, (error: any, results: T) => {
+            if (error) return reject(new Error(error.message + '\n' + q.sql));
             return resolve(results);
         });
     });
