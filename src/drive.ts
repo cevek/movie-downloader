@@ -25,9 +25,19 @@ export class GoogleAuth {
         try {
             var token = fs.readFileSync(this.TOKEN_PATH, 'utf8');
             this.oauth2Client.credentials = JSON.parse(token);
+            this.refreshAccessToken();
         } catch (e) {
             await this.getNewToken();
         }
+    }
+
+    protected refreshAccessToken() {
+        return new Promise((resolve, reject) => {
+            this.oauth2Client.refreshAccessToken((err: Error, tokens: {}) => {
+                if (err) return reject(err);
+                resolve(tokens);
+            });
+        });
     }
 
     protected getNewToken() {
@@ -145,21 +155,20 @@ export class Youtube {
     captionDownload(id: string) {
         return this.google.action<any>('captions', 'download', { id });
     }
+
     upload(title: string, body: any) {
-        var fileMetadata = {
-            snippet: {
-                title: title,
-                privacyStatus: 'private'
-            }
-        };
-        var media = {
-            // mimeType: 'image/jpeg',
-            body: body,
-        };
-        return this.google.action<{id: string}>('videos', 'insert', {
-            resource: fileMetadata,
-            media: media,
-            part: 'id',
+        return this.google.action<{ id: string }>('videos', 'insert', {
+            resource: {
+                snippet: {
+                    title: title,
+                    privacyStatus: 'private',
+                },
+            },
+            media: {
+                // mimeType: 'image/jpeg',
+                body: body,
+            },
+            part: 'id,snippet',
         });
     }
 }
