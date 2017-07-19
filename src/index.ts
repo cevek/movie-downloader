@@ -29,7 +29,7 @@ function walkDir(dir: string) {
     if (dir[dir.length - 1] === '/') {
         dir = dir.substr(0, dir.length - 1);
     }
-    list.forEach(function (file) {
+    list.forEach(function(file) {
         file = dir + '/' + file;
         var stat = fs.statSync(file);
         if (stat && stat.isDirectory()) {
@@ -123,7 +123,7 @@ class MediaFile {
     skipToUpload = false;
     mediaInfo: Maybe<MediaInfo>;
     videoStream: Maybe<Stream>;
-    constructor(public fileName: string) { }
+    constructor(public fileName: string) {}
 }
 
 interface MovieData {
@@ -354,7 +354,7 @@ class Worker {
             var file = allFiles[i];
             if (
                 file.mediaInfo === void 0 &&
-                /(mp3|aac|ac3|dts|mkv|avi|flv|mpe?g|ogg|m4a|mp4|m4v|mov|qt|jpe?g|png|gif|flac|srt|sub|ass|ssa)$/i.test(
+                /(mp3|aac|ac3|dts|mkv|mka|avi|flv|mpe?g|ogg|m4a|mp4|m4v|mov|qt|jpe?g|png|gif|flac|srt|sub|ass|ssa)$/i.test(
                     file.fileName
                 )
             ) {
@@ -543,7 +543,10 @@ class Worker {
         var videoIdx = allFiles.findIndex(file => this.isStreamCodecType(file, 'video'));
         var video = allFiles[videoIdx];
         var audioFiles = allFiles.filter(file => this.isStreamCodecType(file, 'audio'));
-        var audioEn = audioFiles.find(file => this.isMediaFileWithLang(file, Worker.isDefinetlyEnglish));
+        let audioEn = audioFiles.find(file => this.isMediaFileWithLang(file, Worker.isDefinetlyEnglish));
+        if (!audioEn && audioFiles.length === 2) {
+            audioEn = audioFiles.find(file => file.videoStream ? file.videoStream.index === 2 : false);
+        }
         if (video && audioEn && video.mediaInfo && +video.mediaInfo.format.duration > 0) {
             // var ext = video.mediaInfo.format.format_name === 'avi' ? 'avi' : 'mkv';
             var dur = +video.mediaInfo.format.duration;
@@ -552,17 +555,25 @@ class Worker {
             var parts = [];
             var offset = (audioEn.videoStream && +audioEn.videoStream.start_time) || 0;
 
-            let s = `ffmpeg -loglevel error -y -i ${shellArgEscape(
-                video.fileName
-            )} -itsoffset ${offset} -i ${shellArgEscape(audioEn.fileName)} `;
+            let s = ``;
             for (let i = 0; i < partsCount; i++) {
                 var file = new MediaFile(`${dir}${createdFilesPrefix}video_${i}.mp4`);
                 parts.push(file);
-                s += ` -map 0:0 -map 1:0 -ss ${i * 600} -t ${600} -metadata:s:v:0 rotate=90 -c copy ${shellArgEscape(
-                    file.fileName
-                )}`;
+                //-avoid_negative_ts 1
+                promises.push(
+                    this.exec(
+                        `ffmpeg -loglevel error -y -ss ${i * 600} -i ${shellArgEscape(
+                            video.fileName
+                        )} -itsoffset ${offset} -ss ${i * 600} -i ${shellArgEscape(
+                            audioEn.fileName
+                        )} -map 0:0 -map 1:0 -t ${600} -metadata:s:v:0 rotate=90 -c copy ${shellArgEscape(
+                            file.fileName
+                        )}`
+                    )
+                );
             }
-            await exec(s);
+            // await this.exec(s);
+            await Promise.all(promises);
             movieData.videoEnParts = parts;
         } else {
             throw new Error('video or audio not found or not recognized duration');
@@ -584,10 +595,9 @@ class Worker {
         var { movieData, movieData: { id, allFiles, videoEn, videoEnParts, dir } } = this;
         this.log('uploadVideoPartToYoutube', part.fileName);
         try {
-            var res = await this.youtube.upload('FooBar', fs.createReadStream(part.fileName));
-            this.log('Youtube: start processing');
+            var res = await this.youtube.upload(`${id}_${partIdx}`, fs.createReadStream(part.fileName));
+            this.log(`Youtube ${res.id}: start processing`);
             await this.getYtProcessingStatus(res.id);
-            this.log('Youtube: processing');
             await query('INSERT INTO youtubeVideos (downloadId, ytId, part, createdAt) VALUES (?, ?, ?, NOW())', [
                 id,
                 res.id,
@@ -605,8 +615,10 @@ class Worker {
     }
 
     async getYtProcessingStatus(ytId: string) {
-        console.log('getYtProcessingStatus', ytId);
-        var res = await this.youtube.videosList({ id: ytId, part: 'processingDetails' }) as { items: { processingDetails: { processingStatus: string, processingFailureReason: string } }[] };
+        // console.log('getYtProcessingStatus', ytId);
+        var res = (await this.youtube.videosList({ id: ytId, part: 'processingDetails' })) as {
+            items: { processingDetails: { processingStatus: string; processingFailureReason: string } }[];
+        };
         var item = res.items[0];
         var status = item.processingDetails.processingStatus;
         if (status === 'failed' || status === 'terminated') {
@@ -617,7 +629,6 @@ class Worker {
             await this.getYtProcessingStatus(ytId);
         }
         if (status === 'succeeded') {
-
         }
     }
 
@@ -690,7 +701,7 @@ async function main() {
     var torrentWorker = new TorrentWorker({ torrentDownloadLimit: 1 });
     // await drive.auth.authorize();
     var list = await query<MovieDownload[]>(
-        'SELECT d.id, rt2.title, rt2.hash FROM downloads d LEFT JOIN rt2 ON rt2.id = rtId WHERE d.id IN (17,18,19,20)'
+        'SELECT d.id, rt2.title, rt2.hash FROM downloads d LEFT JOIN rt2 ON rt2.id = rtId WHERE d.id IN (18)'
     );
     var promises: Promise<{}>[] = [];
     for (var i = 0; i < list.length; i++) {
